@@ -161,8 +161,8 @@ def from_adc_impersonated(
 
 
 def from_manual_flow(
-        SCOPES: List[str] = ['openid','https://www.googleapis.com/auth/admin.directory.user.readonly'],
-        quota_project_id = "188367707658"
+        SCOPES: List[str] = ['openid'],
+        quota_project_id: Optional[str] = None
 ) -> Credentials:
     """
     Performs the manual Authorization Code Flow with the required PKCE security.
