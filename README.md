@@ -21,9 +21,3 @@ from simple-gcp-auth import from_manual_flow
 
 credentials = from_manual_flow()
 # Authenticate via web link. Can be performed on another device
-
-```python
-from simple-gcp-auth import from_manual_flow
-
-credentials = from_manual_flow()
-# Authenticate via web link. Can be performed on another device
