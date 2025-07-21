@@ -5,7 +5,7 @@ This package provides a simplified way to fetch credentials for Google Cloud Pla
 ## Installation
 
 ```bash
-pip install simple_gcp_auth
+pip install simple-gcp-auth
 ```
 
 ## Usage
