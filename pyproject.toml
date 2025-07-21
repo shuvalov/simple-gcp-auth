@@ -19,7 +19,6 @@ classifiers = [
 dependencies = [
     "google-auth",
     "google-auth-oauthlib",
-    "google-auth-iam",
     "requests"
 ]
 
