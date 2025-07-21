@@ -16,7 +16,12 @@ classifiers = [
     "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
 ]
-dependencies = []
+dependencies = [
+    "google-auth",
+    "google-auth-oauthlib",
+    "google-auth-iam",
+    "requests"
+]
 
 [project.urls]
 "Homepage" = "https://github.com/shuvalov/simple-gcp-auth"
