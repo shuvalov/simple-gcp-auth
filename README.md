@@ -5,19 +5,19 @@ This package provides a simplified way to fetch credentials for Google Cloud Pla
 ## Installation
 
 ```bash
-pip install simple-gcp-auth
+pip install simple_gcp_auth
 ```
 
 ## Usage
 
 ```python
-from simple-gcp-auth import from_interactive_user
+from simple_gcp_auth import from_interactive_user
 
 credentials = from_interactive_user()
 # Authenticate via interactive web-based logon
 
 ```python
-from simple-gcp-auth import from_manual_flow
+from simple_gcp_auth import from_manual_flow
 
 credentials = from_manual_flow()
 # Authenticate via web link. Can be performed on another device
