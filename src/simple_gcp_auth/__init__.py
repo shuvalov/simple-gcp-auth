@@ -6,9 +6,14 @@ different types of Google credentials, including interactive user auth,
 Application Default Credentials (ADC), and impersonated credentials.
 """
 from typing import List, Optional
+import os
+import hashlib
+import base64
+import json
+import keyring
+import requests
+from urllib.parse import urlencode
 
-import google.auth
-import google.auth.transport.requests
 import google.auth
 import google.auth.iam
 import google.auth.impersonated_credentials
@@ -17,12 +22,7 @@ from google.auth.exceptions import DefaultCredentialsError
 from google.oauth2 import service_account
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
-import os
-import hashlib
-import base64
-import requests
-from urllib.parse import urlencode
-from google.oauth2.credentials import Credentials
+
 
 # Well know client ID of gcloud application.
 CLIENT_ID = "764086051850-6qr4p6gpi6hn506pt8ejuq83di341hur.apps.googleusercontent.com"
@@ -38,11 +38,54 @@ _WELL_KNOWN_CLIENT_CONFIG = {
 # Scopes and URLs used for credentials impersonation
 _IMPERSONATION_SCOPES = ["https://www.googleapis.com/auth/iam"]
 _TOKEN_URL = "https://accounts.google.com/o/oauth2/token"
+_KEYCHAIN_SERVICE_NAME = "pypi_simple_gcp_auth"
+
+
+def _get_cache_key(**kwargs) -> str:
+    """
+    Generates a deterministic cache key from function arguments.
+    """
+    # Per requirements, exclude subject_email and the cache flag itself.
+    kwargs.pop("subject_email", None)
+    kwargs.pop("cache_credentials", None)
+
+    # Sort by key to ensure order-insensitivity.
+    sorted_items = sorted(kwargs.items())
+
+    # Create a stable string representation using JSON.
+    encoded_str = json.dumps(sorted_items, sort_keys=True)
+
+    # Return the SHA-256 hash of the string.
+    return hashlib.sha256(encoded_str.encode("utf-8")).hexdigest()
+
+
+def _create_creds_from_refresh_token(
+    refresh_token: str,
+    scopes: List[str],
+    quota_project_id: Optional[str] = None
+) -> Credentials:
+    """Creates a Credentials object from a refresh token."""
+    creds = Credentials(
+        token=None,  # No access token yet, will be fetched on first use.
+        refresh_token=refresh_token,
+        token_uri=_WELL_KNOWN_CLIENT_CONFIG["installed"]["token_uri"],
+        client_id=_WELL_KNOWN_CLIENT_CONFIG["installed"]["client_id"],
+        client_secret=_WELL_KNOWN_CLIENT_CONFIG["installed"]["client_secret"],
+        scopes=scopes,
+    )
+    if quota_project_id:
+        creds = creds.with_quota_project(quota_project_id)
+
+    # Refresh the credentials to get a valid access token immediately.
+    request = google.auth.transport.requests.Request()
+    creds.refresh(request)
+    return creds
 
 
 def from_interactive_user(
     scopes: List[str] = ['openid'],
-    quota_project_id: Optional[str] = None
+    quota_project_id: Optional[str] = None,
+    cache_credentials: bool = False
 ) -> Credentials:
     """Creates user credentials via an interactive local server flow.
 
@@ -52,6 +95,9 @@ def from_interactive_user(
     Args:
         scopes: A list of OAuth 2.0 scopes to request.
         quota_project_id: The project ID to use for quota and billing.
+        cache_credentials: If True, securely caches the refresh token in the
+            system keychain to avoid repeated authentication prompts. Defaults
+            to False.
 
     Returns:
         An authorized `google.oauth2.credentials.Credentials` object.
@@ -59,9 +105,33 @@ def from_interactive_user(
     Raises:
         Exception: If the authentication flow fails.
     """
+    cache_key = _get_cache_key(scopes=scopes, quota_project_id=quota_project_id)
+
+    if cache_credentials:
+        refresh_token = keyring.get_password(_KEYCHAIN_SERVICE_NAME, cache_key)
+        if refresh_token:
+            try:
+                print("Found cached refresh token. Attempting to create credentials.")
+                return _create_creds_from_refresh_token(
+                    refresh_token, scopes, quota_project_id
+                )
+            except Exception as e:
+                print(f"Failed to use cached token (it might be expired or invalid): {e}")
+                print("Proceeding with interactive authentication.")
+                # The token is invalid, so remove it from the cache.
+                keyring.delete_password(_KEYCHAIN_SERVICE_NAME, cache_key)
+
+    # If cache is not used, or if it is empty/invalid, proceed with interactive flow.
     try:
         flow = InstalledAppFlow.from_client_config(_WELL_KNOWN_CLIENT_CONFIG, scopes)
         credentials = flow.run_local_server()
+
+        if cache_credentials and credentials.refresh_token:
+            print("Saving refresh token to keychain for future use.")
+            keyring.set_password(
+                _KEYCHAIN_SERVICE_NAME, cache_key, credentials.refresh_token
+            )
+
         if quota_project_id:
             return credentials.with_quota_project(quota_project_id)
         return credentials
@@ -232,6 +302,7 @@ def from_interactive_user_delegated(
     subject_email: str,
     scopes: List[str],
     quota_project_id: str,
+    cache_credentials: bool = False,
 ) -> Credentials:
     """
     Creates delegated credentials via an interactive user flow to impersonate a service account.
@@ -253,6 +324,9 @@ def from_interactive_user_delegated(
         subject_email: The email address of the Google Workspace user to impersonate.
         scopes: A list of OAuth 2.0 scopes for the final delegated credentials.
         quota_project_id: The project ID to use for quota and billing.
+        cache_credentials: If True, the underlying interactive user authentication
+            will use the system keychain to cache the user's refresh token.
+            Defaults to False.
 
     Returns:
         A `google.oauth2.credentials.Credentials` object with delegated authority.
@@ -264,6 +338,7 @@ def from_interactive_user_delegated(
         user_credentials = from_interactive_user(
             scopes=_IMPERSONATION_SCOPES,
             quota_project_id=quota_project_id,
+            cache_credentials=cache_credentials,
         )
         print("Interactive authentication successful.")
         # 2. Use the user's credentials to impersonate the service account.

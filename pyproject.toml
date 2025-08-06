@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "simple-gcp-auth"
-version = "0.1.2"
+version = "0.2.0"
 authors = [
   { name="Alexey Shuvalov", email="alexey@alexeyshuvalov.com" },
 ]
@@ -19,7 +19,8 @@ classifiers = [
 dependencies = [
     "google-auth",
     "google-auth-oauthlib",
-    "requests"
+    "requests",
+    "keyring"
 ]
 
 [project.urls]
