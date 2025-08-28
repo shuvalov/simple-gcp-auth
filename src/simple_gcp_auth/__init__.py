@@ -231,13 +231,27 @@ def from_adc_impersonated(
 
 
 def from_manual_flow(
-        SCOPES: List[str] = ['openid'],
-        quota_project_id: Optional[str] = None
+        scopes: List[str] = ['openid'],
+        quota_project_id: Optional[str] = None,
+        cache_credentials: bool = False
 ) -> Credentials:
     """
     Performs the manual Authorization Code Flow with the required PKCE security.
     The only method to i found to get Google SDK API token inside of Google Colab.
     """
+    cache_key = _get_cache_key(scopes=scopes, quota_project_id=quota_project_id)
+    if cache_credentials:
+        refresh_token = keyring.get_password(_KEYCHAIN_SERVICE_NAME, cache_key)
+        if refresh_token:
+            try:
+                print("Found cached refresh token. Attempting to create credentials.")
+                return _create_creds_from_refresh_token(
+                    refresh_token, scopes, quota_project_id
+                )
+            except Exception as e:
+                print(f"Failed to use cached token (it might be expired or invalid): {e}")
+                print("Proceeding with manual authentication.")
+                keyring.delete_password(_KEYCHAIN_SERVICE_NAME, cache_key)
     REDIRECT_URI = "https://sdk.cloud.google.com/applicationdefaultauthcode.html"
 
     code_verifier = base64.urlsafe_b64encode(os.urandom(32)).rstrip(b'=').decode('utf-8')
@@ -251,7 +265,7 @@ def from_manual_flow(
         "client_id": CLIENT_ID,
         "redirect_uri": REDIRECT_URI,
         "response_type": "code",
-        "scope": " ".join(SCOPES),
+        "scope": " ".join(scopes),
         "access_type": "offline",
         "prompt": "consent",
         "code_challenge": code_challenge,
@@ -291,9 +305,14 @@ def from_manual_flow(
         token_uri=token_url,
         client_id=CLIENT_ID,
         client_secret=CLIENT_SECRET,
-        scopes=SCOPES,
+        scopes=scopes,
         quota_project_id=quota_project_id
     )
+    if cache_credentials and creds.refresh_token:
+        print("Saving refresh token to keychain for future use.")
+        keyring.set_password(
+            _KEYCHAIN_SERVICE_NAME, cache_key, creds.refresh_token
+        )
     return creds
 
 
@@ -357,4 +376,67 @@ def from_interactive_user_delegated(
 
     except Exception as e:
         print(f"An error occurred during the interactive domain-wide delegation flow: {e}")
+        raise
+
+
+def from_manual_flow_delegated(
+    service_account_email: str,
+    subject_email: str,
+    scopes: List[str],
+    quota_project_id: str,
+    cache_credentials: bool = False,
+) -> Credentials:
+    """
+    Creates delegated credentials via a manual user flow to impersonate a service account.
+
+    This function is for a user running the script in a headless environment
+    (like Google Colab) who does not have gcloud or ADC configured. It
+    initiates a manual authentication flow to get the user's credentials.
+    These credentials are then used to impersonate a service account that has
+    Domain-Wide Delegation (DWD) authority.
+
+    Prerequisites:
+    1. The user authenticating via the manual flow has the "Service Account Token Creator"
+       (`roles/iam.serviceAccountTokenCreator`) IAM role on the `service_account_email`.
+    2. The service account has Domain-Wide Delegation configured in the Google
+       Workspace Admin console for the requested `scopes`.
+
+    Args:
+        service_account_email: The email of the service account configured for DWD.
+        subject_email: The email address of the Google Workspace user to impersonate.
+        scopes: A list of OAuth 2.0 scopes for the final delegated credentials.
+        quota_project_id: The project ID to use for quota and billing.
+        cache_credentials: If True, the underlying manual user authentication
+            will use the system keychain to cache the user's refresh token.
+            Defaults to False.
+
+    Returns:
+        A `google.oauth2.credentials.Credentials` object with delegated authority.
+    """
+    try:
+        # 1. Get user credentials via manual flow.
+        # The user needs cloud-platform scope to be able to impersonate.
+        print("Starting manual user authentication to get base credentials...")
+        user_credentials = from_manual_flow(
+            scopes=_IMPERSONATION_SCOPES,
+            quota_project_id=quota_project_id,
+            cache_credentials=cache_credentials,
+        )
+        print("Manual authentication successful.")
+        # 2. Use the user's credentials to impersonate the service account.
+        print(f"Impersonating service account: {service_account_email}...")
+        service_account_creds = google.auth.impersonated_credentials.Credentials(
+            source_credentials=user_credentials,
+            target_principal=service_account_email,
+            target_scopes=scopes,
+            lifetime=3600,
+            subject=subject_email
+        )
+        auth_request = google.auth.transport.requests.Request()
+        service_account_creds.refresh(auth_request)
+        print("Successfully created delegated credentials.")
+        return service_account_creds
+
+    except Exception as e:
+        print(f"An error occurred during the manual domain-wide delegation flow: {e}")
         raise

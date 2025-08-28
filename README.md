@@ -87,7 +87,7 @@ from google.cloud import bigquery
 
 # This will print a URL. Open it, authenticate, and paste the authorization code back.
 credentials = from_manual_flow(
-    SCOPES=['https://www.googleapis.com/auth/bigquery.readonly'],
+    scopes=['https://www.googleapis.com/auth/bigquery.readonly'],
     quota_project_id='your-gcp-project-id'
 )
 
@@ -96,6 +96,18 @@ bq_client = bigquery.Client(credentials=credentials, project='your-gcp-project-i
 query = "SELECT corpus FROM `bigquery-public-data.samples.shakespeare` LIMIT 10"
 for row in bq_client.query(query):
     print(row.corpus)
+```
+
+#### Caching Credentials
+
+To avoid authenticating every time you run your script, you can enable credential caching. The refresh token will be stored securely in your system's keychain.
+
+```python
+credentials = from_manual_flow(
+    scopes=['https://www.googleapis.com/auth/bigquery.readonly'],
+    quota_project_id='your-gcp-project-id',
+    cache_credentials=True  # Enable caching
+)
 ```
 
 ---
@@ -153,6 +165,30 @@ A more advanced flow for when a user needs to interactively authenticate to then
 from simple_gcp_auth import from_interactive_user_delegated
 
 delegated_credentials = from_interactive_user_delegated(
+    service_account_email='dwd-service-account@your-project.iam.gserviceaccount.com',
+    subject_email='user-to-impersonate@your-domain.com',
+    scopes=['https://www.googleapis.com/auth/admin.directory.user.readonly'],
+    quota_project_id='your-gcp-project-id',
+    cache_credentials=True  # Caching is also supported here
+)
+
+# Use these credentials to call APIs on behalf of the subject_email
+```
+
+---
+
+### 6. For Domain-Wide Delegation (Manual): `from_manual_flow_delegated`
+
+Similar to the interactive delegation, but for headless environments. It uses the manual flow to get the initial user credentials.
+
+**Prerequisites:**
+- The service account must be configured for Domain-Wide Delegation in the Google Workspace Admin console.
+- The authenticating user must have the "Service Account Token Creator" role on the service account.
+
+```python
+from simple_gcp_auth import from_manual_flow_delegated
+
+delegated_credentials = from_manual_flow_delegated(
     service_account_email='dwd-service-account@your-project.iam.gserviceaccount.com',
     subject_email='user-to-impersonate@your-domain.com',
     scopes=['https://www.googleapis.com/auth/admin.directory.user.readonly'],
