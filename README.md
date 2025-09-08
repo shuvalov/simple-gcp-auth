@@ -13,6 +13,7 @@ Authenticating with Google Cloud can be challenging, especially when your applic
 
 - **Interactive User Flow**: Authenticate on a local machine through a web browser.
 - **Credential Caching**: Opt-in to securely cache refresh tokens in your system's native keychain to avoid repeated logins.
+- **Forced Re-authentication**: Clear cached credentials to force a new login.
 - **Manual Code Flow**: Authenticate in headless environments (like remote servers or Google Colab) by copying a code from a URL.
 - **Application Default Credentials (ADC)**: Seamlessly use credentials in standard GCP environments (e.g., GCE, GKE, Cloud Functions).
 - **Service Account Impersonation**:
@@ -75,6 +76,16 @@ credentials = from_interactive_user(
 
 The next time you run this code, it will try to use the cached token instead of opening the browser.
 
+To force re-authentication and clear the cached token, use the `force_reauthentication` flag:
+```python
+credentials = from_interactive_user(
+    scopes=['https://www.googleapis.com/auth/devstorage.read_only'],
+    quota_project_id='your-gcp-project-id',
+    cache_credentials=True,
+    force_reauthentication=True  # This will clear the cache and prompt for a new login
+)
+```
+
 ---
 
 ### 2. For Headless Environments: `from_manual_flow`
@@ -96,18 +107,6 @@ bq_client = bigquery.Client(credentials=credentials, project='your-gcp-project-i
 query = "SELECT corpus FROM `bigquery-public-data.samples.shakespeare` LIMIT 10"
 for row in bq_client.query(query):
     print(row.corpus)
-```
-
-#### Caching Credentials
-
-To avoid authenticating every time you run your script, you can enable credential caching. The refresh token will be stored securely in your system's keychain.
-
-```python
-credentials = from_manual_flow(
-    scopes=['https://www.googleapis.com/auth/bigquery.readonly'],
-    quota_project_id='your-gcp-project-id',
-    cache_credentials=True  # Enable caching
-)
 ```
 
 ---
@@ -169,7 +168,8 @@ delegated_credentials = from_interactive_user_delegated(
     subject_email='user-to-impersonate@your-domain.com',
     scopes=['https://www.googleapis.com/auth/admin.directory.user.readonly'],
     quota_project_id='your-gcp-project-id',
-    cache_credentials=True  # Caching is also supported here
+    cache_credentials=True,  # Caching is also supported here
+    force_reauthentication=True # This will clear the underlying user token
 )
 
 # Use these credentials to call APIs on behalf of the subject_email
@@ -193,7 +193,8 @@ delegated_credentials = from_manual_flow_delegated(
     subject_email='user-to-impersonate@your-domain.com',
     scopes=['https://www.googleapis.com/auth/admin.directory.user.readonly'],
     quota_project_id='your-gcp-project-id',
-    cache_credentials=True  # Caching is also supported here
+    cache_credentials=True,  # Caching is also supported here
+    force_reauthentication=True # This will clear the underlying user token
 )
 
 # Use these credentials to call APIs on behalf of the subject_email

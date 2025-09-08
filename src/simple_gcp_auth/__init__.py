@@ -12,6 +12,7 @@ import base64
 import json
 import keyring
 import requests
+import logging
 from urllib.parse import urlencode
 
 import google.auth
@@ -23,7 +24,9 @@ from google.oauth2 import service_account
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 
-
+# logger
+logger = logging.getLogger(__name__)
+logger.addHandler(logging.NullHandler())
 # Well know client ID of gcloud application.
 CLIENT_ID = "764086051850-6qr4p6gpi6hn506pt8ejuq83di341hur.apps.googleusercontent.com"
 CLIENT_SECRET = "d-FL95Q19q7MQmFpd7hHD0Ty"
@@ -39,6 +42,7 @@ _WELL_KNOWN_CLIENT_CONFIG = {
 _IMPERSONATION_SCOPES = ["https://www.googleapis.com/auth/iam"]
 _TOKEN_URL = "https://accounts.google.com/o/oauth2/token"
 _KEYCHAIN_SERVICE_NAME = "pypi_simple_gcp_auth"
+_MANIFEST_KEY = f"{_KEYCHAIN_SERVICE_NAME}_manifest"
 
 
 def _get_cache_key(**kwargs) -> str:
@@ -48,6 +52,7 @@ def _get_cache_key(**kwargs) -> str:
     # Per requirements, exclude subject_email and the cache flag itself.
     kwargs.pop("subject_email", None)
     kwargs.pop("cache_credentials", None)
+    kwargs.pop("force_reauthentication", None)
 
     # Sort by key to ensure order-insensitivity.
     sorted_items = sorted(kwargs.items())
@@ -57,6 +62,85 @@ def _get_cache_key(**kwargs) -> str:
 
     # Return the SHA-256 hash of the string.
     return hashlib.sha256(encoded_str.encode("utf-8")).hexdigest()
+
+
+def _get_token_manifest() -> dict:
+    """Retrieves the token manifest from the keychain."""
+    manifest_str = keyring.get_password(_KEYCHAIN_SERVICE_NAME, _MANIFEST_KEY)
+    if manifest_str:
+        try:
+            return json.loads(manifest_str)
+        except json.JSONDecodeError:
+            logger.warning("Could not decode token manifest. Starting fresh.")
+            return {}
+    return {}
+
+
+def _set_token_manifest(manifest: dict):
+    """Saves the token manifest to the keychain."""
+    keyring.set_password(
+        _KEYCHAIN_SERVICE_NAME, _MANIFEST_KEY, json.dumps(manifest)
+    )
+
+
+def _clear_cached_token(**kwargs):
+    """
+    Clears a cached token from the keychain and manifest.
+    """
+    cache_key = _get_cache_key(**kwargs)
+    manifest = _get_token_manifest()
+
+    if cache_key in manifest:
+        logger.debug(f"Force re-authentication: clearing token with key {cache_key[:8]}...")
+        # Remove from keychain
+        keyring.delete_password(_KEYCHAIN_SERVICE_NAME, cache_key)
+        # Remove from manifest
+        del manifest[cache_key]
+        _set_token_manifest(manifest)
+
+
+def _find_compatible_token_in_cache(
+    required_scopes: List[str],
+    quota_project_id: Optional[str] = None
+) -> Optional[Credentials]:
+    """
+    Finds a cached token that has at least the required scopes.
+    """
+    manifest = _get_token_manifest()
+    required_scopes_set = set(required_scopes)
+
+    for cache_key, token_info in manifest.items():
+        # 1. Check if quota_project_id matches
+        if token_info.get("quota_project_id") != quota_project_id:
+            continue
+
+        # 2. Check if cached scopes are a superset of required scopes
+        cached_scopes_set = set(token_info.get("scopes", []))
+        if not cached_scopes_set.issuperset(required_scopes_set):
+            continue
+
+        # 3. If compatible, try to create credentials from it
+        refresh_token = keyring.get_password(_KEYCHAIN_SERVICE_NAME, cache_key)
+        if refresh_token:
+            try:
+                logger.debug(f"Found compatible cached token with key: {cache_key[:8]}...")
+                # Use the original scopes the token was created with
+                return _create_creds_from_refresh_token(
+                    refresh_token, token_info["scopes"], quota_project_id
+                )
+            except Exception as e:
+                logger.debug(f"Cached token {cache_key[:8]} is invalid, removing. Error: {e}")
+                # If token is invalid, remove it from keychain and manifest
+                keyring.delete_password(_KEYCHAIN_SERVICE_NAME, cache_key)
+                del manifest[cache_key]
+                _set_token_manifest(manifest)
+        else:
+            # If token is in manifest but not in keychain, clean up manifest
+            logger.warning(f"Token for key {cache_key[:8]} found in manifest but not in keychain. Cleaning up.")
+            del manifest[cache_key]
+            _set_token_manifest(manifest)
+
+    return None
 
 
 def _create_creds_from_refresh_token(
@@ -85,7 +169,8 @@ def _create_creds_from_refresh_token(
 def from_interactive_user(
     scopes: List[str] = ['openid'],
     quota_project_id: Optional[str] = None,
-    cache_credentials: bool = False
+    cache_credentials: bool = False,
+    force_reauthentication: bool = False
 ) -> Credentials:
     """Creates user credentials via an interactive local server flow.
 
@@ -98,6 +183,8 @@ def from_interactive_user(
         cache_credentials: If True, securely caches the refresh token in the
             system keychain to avoid repeated authentication prompts. Defaults
             to False.
+        force_reauthentication: If True, clears any cached credentials for this
+            configuration and forces a new authentication flow. Defaults to False.
 
     Returns:
         An authorized `google.oauth2.credentials.Credentials` object.
@@ -105,21 +192,13 @@ def from_interactive_user(
     Raises:
         Exception: If the authentication flow fails.
     """
-    cache_key = _get_cache_key(scopes=scopes, quota_project_id=quota_project_id)
+    if cache_credentials and force_reauthentication:
+        _clear_cached_token(scopes=scopes, quota_project_id=quota_project_id)
 
     if cache_credentials:
-        refresh_token = keyring.get_password(_KEYCHAIN_SERVICE_NAME, cache_key)
-        if refresh_token:
-            try:
-                print("Found cached refresh token. Attempting to create credentials.")
-                return _create_creds_from_refresh_token(
-                    refresh_token, scopes, quota_project_id
-                )
-            except Exception as e:
-                print(f"Failed to use cached token (it might be expired or invalid): {e}")
-                print("Proceeding with interactive authentication.")
-                # The token is invalid, so remove it from the cache.
-                keyring.delete_password(_KEYCHAIN_SERVICE_NAME, cache_key)
+        cached_creds = _find_compatible_token_in_cache(scopes, quota_project_id)
+        if cached_creds:
+            return cached_creds
 
     # If cache is not used, or if it is empty/invalid, proceed with interactive flow.
     try:
@@ -127,10 +206,18 @@ def from_interactive_user(
         credentials = flow.run_local_server()
 
         if cache_credentials and credentials.refresh_token:
-            print("Saving refresh token to keychain for future use.")
+            cache_key = _get_cache_key(scopes=scopes, quota_project_id=quota_project_id)
+            logger.debug(f"Saving new refresh token to keychain with key: {cache_key[:8]}...")
             keyring.set_password(
                 _KEYCHAIN_SERVICE_NAME, cache_key, credentials.refresh_token
             )
+            # Update the manifest
+            manifest = _get_token_manifest()
+            manifest[cache_key] = {
+                "scopes": scopes,
+                "quota_project_id": quota_project_id,
+            }
+            _set_token_manifest(manifest)
 
         if quota_project_id:
             return credentials.with_quota_project(quota_project_id)
@@ -233,25 +320,21 @@ def from_adc_impersonated(
 def from_manual_flow(
         scopes: List[str] = ['openid'],
         quota_project_id: Optional[str] = None,
-        cache_credentials: bool = False
+        cache_credentials: bool = False,
+        force_reauthentication: bool = False
 ) -> Credentials:
     """
     Performs the manual Authorization Code Flow with the required PKCE security.
     The only method to i found to get Google SDK API token inside of Google Colab.
     """
-    cache_key = _get_cache_key(scopes=scopes, quota_project_id=quota_project_id)
+    if cache_credentials and force_reauthentication:
+        _clear_cached_token(scopes=scopes, quota_project_id=quota_project_id)
+
     if cache_credentials:
-        refresh_token = keyring.get_password(_KEYCHAIN_SERVICE_NAME, cache_key)
-        if refresh_token:
-            try:
-                print("Found cached refresh token. Attempting to create credentials.")
-                return _create_creds_from_refresh_token(
-                    refresh_token, scopes, quota_project_id
-                )
-            except Exception as e:
-                print(f"Failed to use cached token (it might be expired or invalid): {e}")
-                print("Proceeding with manual authentication.")
-                keyring.delete_password(_KEYCHAIN_SERVICE_NAME, cache_key)
+        cached_creds = _find_compatible_token_in_cache(scopes, quota_project_id)
+        if cached_creds:
+            return cached_creds
+
     REDIRECT_URI = "https://sdk.cloud.google.com/applicationdefaultauthcode.html"
 
     code_verifier = base64.urlsafe_b64encode(os.urandom(32)).rstrip(b'=').decode('utf-8')
@@ -309,10 +392,18 @@ def from_manual_flow(
         quota_project_id=quota_project_id
     )
     if cache_credentials and creds.refresh_token:
-        print("Saving refresh token to keychain for future use.")
+        cache_key = _get_cache_key(scopes=scopes, quota_project_id=quota_project_id)
+        logger.debug(f"Saving new refresh token to keychain with key: {cache_key[:8]}...")
         keyring.set_password(
             _KEYCHAIN_SERVICE_NAME, cache_key, creds.refresh_token
         )
+        # Update the manifest
+        manifest = _get_token_manifest()
+        manifest[cache_key] = {
+            "scopes": scopes,
+            "quota_project_id": quota_project_id,
+        }
+        _set_token_manifest(manifest)
     return creds
 
 
@@ -322,6 +413,7 @@ def from_interactive_user_delegated(
     scopes: List[str],
     quota_project_id: str,
     cache_credentials: bool = False,
+    force_reauthentication: bool = False,
 ) -> Credentials:
     """
     Creates delegated credentials via an interactive user flow to impersonate a service account.
@@ -346,6 +438,8 @@ def from_interactive_user_delegated(
         cache_credentials: If True, the underlying interactive user authentication
             will use the system keychain to cache the user's refresh token.
             Defaults to False.
+        force_reauthentication: If True, clears any cached credentials for this
+            configuration and forces a new authentication flow. Defaults to False.
 
     Returns:
         A `google.oauth2.credentials.Credentials` object with delegated authority.
@@ -353,15 +447,16 @@ def from_interactive_user_delegated(
     try:
         # 1. Get user credentials via interactive flow.
         # The user needs cloud-platform scope to be able to impersonate.
-        print("Starting interactive user authentication to get base credentials...")
+        logger.debug("Starting interactive user authentication to get base credentials...")
         user_credentials = from_interactive_user(
             scopes=_IMPERSONATION_SCOPES,
             quota_project_id=quota_project_id,
             cache_credentials=cache_credentials,
+            force_reauthentication=force_reauthentication,
         )
-        print("Interactive authentication successful.")
+        logger.debug("Interactive authentication successful.")
         # 2. Use the user's credentials to impersonate the service account.
-        print(f"Impersonating service account: {service_account_email}...")
+        logger.debug(f"Impersonating service account: {service_account_email}...")
         service_account_creds = google.auth.impersonated_credentials.Credentials(
             source_credentials=user_credentials,
             target_principal=service_account_email,
@@ -371,7 +466,7 @@ def from_interactive_user_delegated(
         )
         auth_request = google.auth.transport.requests.Request()
         service_account_creds.refresh(auth_request)
-        print("Successfully created delegated credentials.")
+        logger.debug("Successfully created delegated credentials.")
         return service_account_creds
 
     except Exception as e:
@@ -385,6 +480,7 @@ def from_manual_flow_delegated(
     scopes: List[str],
     quota_project_id: str,
     cache_credentials: bool = False,
+    force_reauthentication: bool = False,
 ) -> Credentials:
     """
     Creates delegated credentials via a manual user flow to impersonate a service account.
@@ -409,6 +505,8 @@ def from_manual_flow_delegated(
         cache_credentials: If True, the underlying manual user authentication
             will use the system keychain to cache the user's refresh token.
             Defaults to False.
+        force_reauthentication: If True, clears any cached credentials for this
+            configuration and forces a new authentication flow. Defaults to False.
 
     Returns:
         A `google.oauth2.credentials.Credentials` object with delegated authority.
@@ -416,15 +514,16 @@ def from_manual_flow_delegated(
     try:
         # 1. Get user credentials via manual flow.
         # The user needs cloud-platform scope to be able to impersonate.
-        print("Starting manual user authentication to get base credentials...")
+        logger.debug("Starting manual user authentication to get base credentials...")
         user_credentials = from_manual_flow(
             scopes=_IMPERSONATION_SCOPES,
             quota_project_id=quota_project_id,
             cache_credentials=cache_credentials,
+            force_reauthentication=force_reauthentication,
         )
-        print("Manual authentication successful.")
+        logger.debug("Manual authentication successful.")
         # 2. Use the user's credentials to impersonate the service account.
-        print(f"Impersonating service account: {service_account_email}...")
+        logger.debug(f"Impersonating service account: {service_account_email}...")
         service_account_creds = google.auth.impersonated_credentials.Credentials(
             source_credentials=user_credentials,
             target_principal=service_account_email,
@@ -434,7 +533,7 @@ def from_manual_flow_delegated(
         )
         auth_request = google.auth.transport.requests.Request()
         service_account_creds.refresh(auth_request)
-        print("Successfully created delegated credentials.")
+        logger.debug("Successfully created delegated credentials.")
         return service_account_creds
 
     except Exception as e:
