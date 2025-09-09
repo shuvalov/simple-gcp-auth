@@ -13,6 +13,7 @@ import json
 import keyring
 import requests
 import logging
+import socket
 from urllib.parse import urlencode
 
 import google.auth
@@ -166,6 +167,14 @@ def _create_creds_from_refresh_token(
     return creds
 
 
+def _find_free_port():
+    """Finds and returns an available TCP port on the system."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("", 0))
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        return s.getsockname()[1]
+
+
 def from_interactive_user(
     scopes: List[str] = ['openid'],
     quota_project_id: Optional[str] = None,
@@ -203,7 +212,8 @@ def from_interactive_user(
     # If cache is not used, or if it is empty/invalid, proceed with interactive flow.
     try:
         flow = InstalledAppFlow.from_client_config(_WELL_KNOWN_CLIENT_CONFIG, scopes)
-        credentials = flow.run_local_server()
+        port = _find_free_port()
+        credentials = flow.run_local_server(port=port)
 
         if cache_credentials and credentials.refresh_token:
             cache_key = _get_cache_key(scopes=scopes, quota_project_id=quota_project_id)
